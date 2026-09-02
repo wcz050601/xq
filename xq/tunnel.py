@@ -39,6 +39,15 @@ def normalize_server_url(value: str, port: int) -> str:
     return f"ws://{value}:{port}"
 
 
+def is_edge_dns_error(text: str) -> bool:
+    lowered = text.lower()
+    return "argotunnel.com" in lowered and (
+        "could not lookup srv records" in lowered
+        or "error looking up cloudflare edge ips" in lowered
+        or "no such host" in lowered
+    )
+
+
 class QuickTunnel:
     """Manage a zero-configuration Cloudflare Quick Tunnel on Windows."""
 
@@ -68,45 +77,69 @@ class QuickTunnel:
             if self.stop_flag.is_set():
                 return
             on_status("正在建立免费公网隧道…")
-            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            self.process = subprocess.Popen(
-                [
-                    str(executable), "tunnel", "--no-autoupdate",
-                    "--protocol", "http2", "--url", f"http://127.0.0.1:{port}",
-                ],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", creationflags=flags,
+            was_ready, detail = self._run_cloudflared(
+                executable, port, on_status, on_ready, region=None
             )
-            recent = []
-            public_url = None
-            registered = False
-            ready = False
-            assert self.process.stdout is not None
-            for line in self.process.stdout:
-                recent.append(line.strip())
-                recent = recent[-8:]
-                url = parse_tunnel_url(line)
-                if url:
-                    public_url = url
-                    on_status("公网地址已生成，正在等待证书和路由生效…")
-                if "registered tunnel connection" in line.lower():
-                    registered = True
-                if public_url and registered and not ready:
-                    self._wait_until_public_ready(public_url, on_status)
-                    if self.stop_flag.is_set():
-                        return
-                    on_ready(public_url)
-                    ready = True
-                if self.stop_flag.is_set():
-                    return
+            if self.stop_flag.is_set():
+                return
+            if not was_ready and is_edge_dns_error(detail):
+                on_status("当前 DNS 无法发现全球节点，正在自动切换备用区域…")
+                was_ready, detail = self._run_cloudflared(
+                    executable, port, on_status, on_ready, region="us"
+                )
             if not self.stop_flag.is_set():
-                detail = next((item for item in reversed(recent) if item), "cloudflared 已退出")
-                raise RuntimeError(detail)
+                prefix = "公网隧道连接已中断：" if was_ready else ""
+                raise RuntimeError(prefix + detail)
         except Exception as exc:
             if not self.stop_flag.is_set():
                 on_error(str(exc))
         finally:
             self._terminate_process()
+
+    def _run_cloudflared(self, executable, port, on_status, on_ready, region) -> tuple[bool, str]:
+        command = self._cloudflared_command(executable, port, region)
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", creationflags=flags,
+        )
+        recent = []
+        public_url = None
+        registered = False
+        ready = False
+        assert self.process.stdout is not None
+        for line in self.process.stdout:
+            recent.append(line.strip())
+            recent = recent[-12:]
+            url = parse_tunnel_url(line)
+            if url:
+                public_url = url
+                on_status("公网地址已生成，正在等待证书和路由生效…")
+            if "registered tunnel connection" in line.lower():
+                registered = True
+            if public_url and registered and not ready:
+                self._wait_until_public_ready(public_url, on_status)
+                if self.stop_flag.is_set():
+                    return ready, "已取消"
+                on_ready(public_url)
+                ready = True
+            if self.stop_flag.is_set():
+                return ready, "已取消"
+        detail = next((item for item in reversed(recent) if item), "cloudflared 已退出")
+        self._terminate_process()
+        return ready, detail
+
+    @staticmethod
+    def _cloudflared_command(executable, port: int, region: str | None) -> list[str]:
+        command = [
+            str(executable), "tunnel", "--no-autoupdate",
+            "--protocol", "http2", "--edge-ip-version", "4",
+        ]
+        if region:
+            command.extend(["--region", region])
+        command.extend(["--url", f"http://127.0.0.1:{port}"])
+        return command
 
     def _ensure_binary(self, on_status) -> Path:
         if platform.system() != "Windows" or platform.machine().lower() not in ("amd64", "x86_64"):

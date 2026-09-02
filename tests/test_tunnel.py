@@ -2,7 +2,13 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from xq.tunnel import DIRECT_DOWNLOAD_URL, QuickTunnel, normalize_server_url, parse_tunnel_url
+from xq.tunnel import (
+    DIRECT_DOWNLOAD_URL,
+    QuickTunnel,
+    is_edge_dns_error,
+    normalize_server_url,
+    parse_tunnel_url,
+)
 
 
 class TunnelHelpersTests(unittest.TestCase):
@@ -12,6 +18,22 @@ class TunnelHelpersTests(unittest.TestCase):
 
     def test_unrelated_log_line_has_no_url(self):
         self.assertIsNone(parse_tunnel_url("INF Starting tunnel"))
+
+    def test_cloudflare_srv_lookup_failure_is_detected_for_region_fallback(self):
+        message = (
+            "Could not lookup srv records on _v2-origintunneld._tcp.argotunnel.com: "
+            "lookup argotunnel.com: no such host"
+        )
+        self.assertTrue(is_edge_dns_error(message))
+        self.assertFalse(is_edge_dns_error("Cloudflare HTTP 530"))
+
+    def test_backup_region_command_forces_ipv4_http2(self):
+        command = QuickTunnel._cloudflared_command("cloudflared.exe", 8765, "us")
+
+        self.assertIn("http2", command)
+        self.assertIn("4", command)
+        self.assertEqual(command[command.index("--region") + 1], "us")
+        self.assertEqual(command[-1], "http://127.0.0.1:8765")
 
     def test_server_address_normalization(self):
         self.assertEqual(normalize_server_url("192.168.1.2", 8765), "ws://192.168.1.2:8765")
