@@ -24,7 +24,7 @@ android.minapi = 24
 android.ndk = 28c
 
 # 不使用不断变化的 p4a master
-p4a.branch = v2026.05.09
+p4a.branch = develop
 
 [buildozer]
 log_level = 2
