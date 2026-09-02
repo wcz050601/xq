@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 import threading
 from collections.abc import Callable
 
@@ -36,7 +37,11 @@ class NetworkClient:
             self.loop = None
 
     async def _run(self, url: str, first_message: dict) -> None:
-        async with connect(url, ping_interval=20, ping_timeout=20) as websocket:
+        options = {}
+        if url.startswith("wss://"):
+            import certifi
+            options["ssl"] = ssl.create_default_context(cafile=certifi.where())
+        async with connect(url, ping_interval=20, ping_timeout=20, **options) as websocket:
             self.websocket = websocket
             await websocket.send(json.dumps(first_message, ensure_ascii=False))
             async for raw in websocket:
@@ -54,4 +59,3 @@ class NetworkClient:
     def close(self) -> None:
         if self.loop and self.websocket:
             asyncio.run_coroutine_threadsafe(self.websocket.close(), self.loop)
-

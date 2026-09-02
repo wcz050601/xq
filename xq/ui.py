@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.core.clipboard import Clipboard
 from kivy.core.text import Label as CoreLabel
 from kivy.graphics import Color, Ellipse, Line, Rectangle
 from kivy.metrics import dp
@@ -23,6 +24,7 @@ from .embedded_server import EmbeddedServer, local_ip
 from .game import BLACK, RED, Game, Move, color_of, opponent
 from .network import NetworkClient
 from .storage import Storage
+from .tunnel import QuickTunnel, normalize_server_url
 
 
 PIECE_TEXT = {
@@ -232,8 +234,12 @@ class GameScreen(Screen):
         bar.add_widget(self.chat_button)
         bar.add_widget(ui_button("悔棋", lambda *_: controller.request_undo(), size_hint_x=.18))
         root.add_widget(bar)
-        self.connection_info = ui_label("", size_hint_y=None, height=0, color=(.85, .72, .25, 1))
-        root.add_widget(self.connection_info)
+        self.connection_row = BoxLayout(size_hint_y=None, height=0, spacing=dp(4))
+        self.connection_info = ui_label("", color=(.85, .72, .25, 1))
+        self.connection_row.add_widget(self.connection_info)
+        self.copy_button = ui_button("复制邀请", lambda *_: controller.copy_invite(), size_hint_x=.2)
+        self.connection_row.add_widget(self.copy_button)
+        root.add_widget(self.connection_row)
         self.clock_label = ui_label("红方 --:--   黑方 --:--", size_hint_y=None, height=dp(30), font_size=dp(18))
         root.add_widget(self.clock_label)
         self.board = BoardWidget(controller)
@@ -243,9 +249,11 @@ class GameScreen(Screen):
         self.bind(size=lambda _widget, value: setattr(root, "size", value))
         self.bind(pos=lambda _widget, value: setattr(root, "pos", value))
 
-    def set_connection_info(self, text: str) -> None:
+    def set_connection_info(self, text: str, can_copy: bool = False) -> None:
         self.connection_info.text = text
-        self.connection_info.height = dp(28) if text else 0
+        self.connection_row.height = dp(32) if text else 0
+        self.copy_button.disabled = not can_copy
+        self.copy_button.opacity = 1 if can_copy else 0
 
 
 class ReplayScreen(Screen):
@@ -343,6 +351,8 @@ class MainView(ScreenManager):
         self.sounds = Sounds()
         self.network = NetworkClient(self._network_message, self._network_error)
         self.embedded_server = EmbeddedServer()
+        self.quick_tunnel = QuickTunnel(Path(storage_path).parent / "tools")
+        self.invite_text = ""
         self.mode = "local"
         self.my_color: str | None = None
         self.game = Game()
@@ -378,19 +388,19 @@ class MainView(ScreenManager):
         per_move = self._popup_field(form, "步时（秒，0不限）", str(saved.get("move_seconds", 60)))
         handicap = self._popup_field(form, "让子（例 R1,H1）", saved.get("handicap", ""))
         room = port = None
-        if mode == "host":
+        if mode in ("host", "public_host"):
             room = self._popup_field(form, "房间号", saved.get("room", "xq001"))
             port = self._popup_field(form, "端口号", str(saved.get("port", 8765)))
         box.add_widget(form)
         popup = Popup(
-            title="本局设置" if mode == "local" else "创建联机对局",
-            title_font=FONT, content=box, size_hint=(.84, .68 if mode == "host" else .58), auto_dismiss=False,
+            title="本局设置" if mode == "local" else ("一键创建公网对局" if mode == "public_host" else "创建局域网对局"),
+            title_font=FONT, content=box, size_hint=(.84, .68 if mode in ("host", "public_host") else .58), auto_dismiss=False,
         )
 
         def submit(*_):
             try:
                 settings = self._parse_settings(total.text, per_move.text, handicap.text)
-                if mode == "host":
+                if mode in ("host", "public_host"):
                     settings["room"] = room.text.strip()
                     settings["port"] = int(port.text.strip())
                     if not settings["room"] or not 1 <= settings["port"] <= 65535:
@@ -402,6 +412,8 @@ class MainView(ScreenManager):
             popup.dismiss()
             if mode == "local":
                 self.start_local(settings)
+            elif mode == "public_host":
+                self.start_public_host(settings)
             else:
                 self.start_host(settings)
 
@@ -428,9 +440,10 @@ class MainView(ScreenManager):
 
     def open_online_menu(self) -> None:
         box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(9))
-        box.add_widget(ui_label("创建方会在本软件内启动服务，并显示供对方连接的 IP 和端口。"))
-        popup = Popup(title="联机对弈", title_font=FONT, content=box, size_hint=(.78, .48), auto_dismiss=False)
-        box.add_widget(ui_button("创建对局（本机作为主机）", lambda *_: (popup.dismiss(), self.open_game_settings("host"))))
+        box.add_widget(ui_label("公网房间可跨 Wi-Fi/蜂窝网络；首次使用会自动下载官方穿透组件。"))
+        popup = Popup(title="联机对弈", title_font=FONT, content=box, size_hint=(.8, .58), auto_dismiss=False)
+        box.add_widget(ui_button("一键创建公网对局（推荐）", lambda *_: (popup.dismiss(), self.open_game_settings("public_host"))))
+        box.add_widget(ui_button("创建局域网对局", lambda *_: (popup.dismiss(), self.open_game_settings("host"))))
         box.add_widget(ui_button("加入对局", lambda *_: (popup.dismiss(), self.open_join_settings())))
         box.add_widget(ui_button("取消", lambda *_: popup.dismiss()))
         popup.open()
@@ -439,7 +452,7 @@ class MainView(ScreenManager):
         saved = self.storage.settings
         box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(7))
         form = GridLayout(cols=2, spacing=dp(6))
-        host = self._popup_field(form, "主机 IP", saved.get("host", "127.0.0.1"))
+        host = self._popup_field(form, "主机 IP 或 WSS 地址", saved.get("host", "127.0.0.1"))
         port = self._popup_field(form, "端口号", str(saved.get("port", 8765)))
         room = self._popup_field(form, "房间号", saved.get("room", "xq001"))
         box.add_widget(form)
@@ -447,7 +460,7 @@ class MainView(ScreenManager):
 
         def submit(*_):
             try:
-                port_number = int(port.text.strip())
+                port_number = int(port.text.strip() or saved.get("port", 8765))
                 if not host.text.strip() or not room.text.strip() or not 1 <= port_number <= 65535:
                     raise ValueError
             except ValueError:
@@ -466,9 +479,11 @@ class MainView(ScreenManager):
 
     def _prepare_game(self, mode: str, settings: dict) -> None:
         self.network.close()
-        if mode != "host":
+        if mode not in ("host", "public_host"):
             self.embedded_server.stop()
-        self.mode = "network" if mode in ("host", "join") else "local"
+        if mode != "public_host":
+            self.quick_tunnel.stop()
+        self.mode = "network" if mode in ("host", "public_host", "join") else "local"
         self.my_color = None
         handicap = [x.strip() for x in settings.get("handicap", "").split(",") if x.strip()]
         self.game = Game(handicap)
@@ -481,6 +496,7 @@ class MainView(ScreenManager):
         self.chat_label = None
         self.chat_scroll = None
         self.game_screen.chat_button.text = "聊天"
+        self.invite_text = ""
         self.board.flip = False
         self.board.selected = None
         self.board.set_game(self.game)
@@ -508,6 +524,44 @@ class MainView(ScreenManager):
 
         self.embedded_server.start(port, ready, self._network_error)
 
+    def start_public_host(self, settings: dict) -> None:
+        self._prepare_game("public_host", settings)
+        port, room = int(settings["port"]), settings["room"]
+        self.game_screen.status.text = "正在软件内启动房间服务…"
+        self.game_screen.set_connection_info("公网穿透准备中…")
+
+        def local_ready():
+            Clock.schedule_once(lambda _dt: self._start_quick_tunnel(port, room, settings), 0)
+
+        self.embedded_server.start(port, local_ready, self._network_error)
+
+    def _start_quick_tunnel(self, port: int, room: str, settings: dict) -> None:
+        self.quick_tunnel.start(
+            port,
+            lambda text: Clock.schedule_once(lambda _dt: self._tunnel_status(text), 0),
+            lambda url: Clock.schedule_once(lambda _dt: self._tunnel_ready(url, port, room, settings), 0),
+            lambda error: Clock.schedule_once(lambda _dt: self._tunnel_error(error), 0),
+        )
+
+    def _tunnel_status(self, text: str) -> None:
+        self.game_screen.status.text = text
+
+    def _tunnel_ready(self, url: str, port: int, room: str, settings: dict) -> None:
+        self.invite_text = f"中国象棋公网对局\n服务器：{url}\n房间号：{room}"
+        self.game_screen.set_connection_info(f"公网：{url}   房间：{room}", can_copy=True)
+        self._host_ready(port, room, settings)
+        self.game_screen.status.text = "公网房间已创建，等待对方加入"
+
+    def _tunnel_error(self, error: str) -> None:
+        self.embedded_server.stop()
+        self.show_error(f"公网穿透失败：{error}")
+
+    def copy_invite(self) -> None:
+        if not self.invite_text:
+            return
+        Clipboard.copy(self.invite_text)
+        self.game_screen.status.text = "邀请信息已复制，可发送给对方"
+
     def _host_ready(self, port: int, room: str, settings: dict) -> None:
         self.game_screen.status.text = "等待对方加入"
         self.network.start(f"ws://127.0.0.1:{port}", {
@@ -519,7 +573,7 @@ class MainView(ScreenManager):
 
     def start_join(self, settings: dict) -> None:
         self._prepare_game("join", settings)
-        url = f"ws://{settings['host']}:{settings['port']}"
+        url = normalize_server_url(settings["host"], int(settings["port"]))
         self.game_screen.set_connection_info(f"连接：{url}   房间号：{settings['room']}")
         self.game_screen.status.text = "正在连接主机…"
         self.network.start(url, {"action": "join", "room": settings["room"]})
@@ -527,6 +581,7 @@ class MainView(ScreenManager):
     def leave_game(self) -> None:
         def leave():
             self.network.close()
+            self.quick_tunnel.stop()
             self.embedded_server.stop()
             self.current = "menu"
         if self.move_history and not self.game.winner:
@@ -794,6 +849,7 @@ class MainView(ScreenManager):
 
     def shutdown(self) -> None:
         self.network.close()
+        self.quick_tunnel.stop()
         self.embedded_server.stop()
 
 

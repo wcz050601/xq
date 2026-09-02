@@ -9,7 +9,7 @@ source.exclude_dirs = tests,.git,.venv,__pycache__
 
 version = 0.1.0
 
-requirements = python3,kivy,websockets
+requirements = python3,kivy,websockets,certifi
 
 orientation = portrait
 fullscreen = 0
