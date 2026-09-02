@@ -1,7 +1,7 @@
 [app]
 title = Python Chinese Chess
 package.name = pyxq
-package.domain = org.example
+package.domain = io.github.wcz050601
 source.dir = .
 source.include_exts = py,kv,png,jpg,wav,mp3,json
 source.exclude_dirs = tests,.git,.venv,__pycache__
@@ -10,8 +10,8 @@ requirements = python3,kivy,websockets
 orientation = portrait
 fullscreen = 0
 android.permissions = INTERNET
+android.archs = arm64-v8a
 
 [buildozer]
 log_level = 2
 warn_on_root = 1
-

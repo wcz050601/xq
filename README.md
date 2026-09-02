@@ -61,7 +61,23 @@ python main.py
 
 ## Android 打包
 
-Android 构建建议在 Linux 或 WSL2 中进行（Buildozer 不直接支持原生 Windows 构建）：
+### GitHub 一键构建（推荐）
+
+仓库已包含 `.github/workflows/android-apk.yml`：
+
+1. 把本地修改推送到 GitHub。
+2. 打开仓库的 **Actions** 页面。
+3. 选择 **Build Android APK**。
+4. 点击 **Run workflow**，再次点击绿色的 **Run workflow**。
+5. 构建完成后，打开该次运行，在页面底部 **Artifacts** 下载 `pyxq-android-apk`。
+
+下载的是 ZIP 压缩包，解压后即可得到可安装的 debug APK。第一次云端构建需要下载 Android SDK/NDK，可能耗时较长。
+
+工作流也会在推送形如 `v0.1.0` 的 Git 标签时自动构建。当前 APK 仅构建现代 Android 手机通用的 `arm64-v8a` 架构，以减少构建时间和失败概率。
+
+### 本地构建
+
+本地 Android 构建建议在 Linux 或 WSL2 中进行（Buildozer 不直接支持原生 Windows 构建）：
 
 ```bash
 pip install buildozer
