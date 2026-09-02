@@ -16,26 +16,51 @@ concurrency:
 jobs:
   build-apk:
     name: Build debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Build APK with Buildozer
-        id: buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          command: buildozer android debug
-          workdir: .
-          buildozer_version: stable
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            openjdk-17-jdk \
+            git \
+            zip \
+            unzip \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            zlib1g-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            cmake \
+            libffi-dev \
+            libssl-dev
+
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildozer cython
+
+      - name: Build APK
+        run: |
+          buildozer android debug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: pyxq-android-apk
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
           if-no-files-found: error
           retention-days: 14
 
@@ -45,4 +70,3 @@ jobs:
         run: |
           echo "## Android APK 构建成功" >> "$GITHUB_STEP_SUMMARY"
           echo "在本次运行页面底部的 **Artifacts** 区域下载 \`pyxq-android-apk\`。" >> "$GITHUB_STEP_SUMMARY"
-
