@@ -1,0 +1,9 @@
+.venv/
+.kivy-home/
+__pycache__/
+*.py[cod]
+.coverage
+bin/
+.buildozer/
+ui-smoke*.png
+
