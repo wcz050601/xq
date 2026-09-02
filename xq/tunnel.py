@@ -13,6 +13,10 @@ from pathlib import Path
 
 
 RELEASE_API = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest"
+DIRECT_DOWNLOAD_URL = (
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/"
+    "cloudflared-windows-amd64.exe"
+)
 TUNNEL_URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com", re.IGNORECASE)
 
 
@@ -103,19 +107,10 @@ class QuickTunnel:
             return executable
 
         on_status("首次使用：正在从 Cloudflare 官方仓库下载穿透组件…")
-        request = urllib.request.Request(RELEASE_API, headers={"User-Agent": "pyxq/0.1"})
-        with urllib.request.urlopen(request, timeout=20) as response:
-            release = json.load(response)
-        asset = next(
-            (item for item in release.get("assets", []) if item.get("name") == "cloudflared-windows-amd64.exe"),
-            None,
-        )
-        if not asset:
-            raise RuntimeError("Cloudflare 发布页中没有找到 Windows 64 位组件")
+        download_url, total, expected = self._download_source(on_status)
         temporary = executable.with_suffix(".download")
         digest = hashlib.sha256()
-        download = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "pyxq/0.1"})
-        total = int(asset.get("size") or 0)
+        download = urllib.request.Request(download_url, headers={"User-Agent": "pyxq/0.1"})
         received = 0
         try:
             with urllib.request.urlopen(download, timeout=60) as response, temporary.open("wb") as output:
@@ -128,7 +123,10 @@ class QuickTunnel:
                     received += len(chunk)
                     if total:
                         on_status(f"首次下载穿透组件：{received * 100 // total}%")
-            expected = str(asset.get("digest") or "")
+                    elif received:
+                        on_status(f"首次下载穿透组件：{received // 1024 // 1024} MB")
+            if received <= 1_000_000:
+                raise RuntimeError("下载的穿透组件不完整，请检查网络后重试")
             if expected.startswith("sha256:") and digest.hexdigest().lower() != expected[7:].lower():
                 raise RuntimeError("穿透组件校验失败，已拒绝运行")
             temporary.replace(executable)
@@ -136,6 +134,26 @@ class QuickTunnel:
             if temporary.exists():
                 temporary.unlink()
         return executable
+
+    @staticmethod
+    def _download_source(on_status) -> tuple[str, int, str]:
+        """Prefer release metadata for its digest, but never depend on API quota."""
+        try:
+            request = urllib.request.Request(RELEASE_API, headers={"User-Agent": "pyxq/0.1"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                release = json.load(response)
+            asset = next(
+                item for item in release.get("assets", [])
+                if item.get("name") == "cloudflared-windows-amd64.exe"
+            )
+            return (
+                asset["browser_download_url"],
+                int(asset.get("size") or 0),
+                str(asset.get("digest") or ""),
+            )
+        except (OSError, ValueError, KeyError, StopIteration):
+            on_status("GitHub 接口受限，正在改用官方最新版直链…")
+            return DIRECT_DOWNLOAD_URL, 0, ""
 
     def _terminate_process(self) -> None:
         process, self.process = self.process, None
