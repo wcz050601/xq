@@ -31,6 +31,37 @@ class TunnelHelpersTests(unittest.TestCase):
         self.assertEqual((size, digest), (0, ""))
         self.assertTrue(any("官方最新版直链" in text for text in statuses))
 
+    @patch("xq.tunnel.urllib.request.urlopen")
+    def test_websocket_upgrade_response_means_public_route_is_ready(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://blue-tree.trycloudflare.com", 426, "Upgrade Required", {}, None
+        )
+
+        ready, error = QuickTunnel._probe_public_url("wss://blue-tree.trycloudflare.com")
+
+        self.assertTrue(ready)
+        self.assertEqual(error, "")
+
+    @patch("xq.tunnel.urllib.request.urlopen")
+    def test_certificate_mismatch_keeps_public_route_waiting(self, urlopen):
+        urlopen.side_effect = urllib.error.URLError("certificate hostname mismatch")
+
+        ready, error = QuickTunnel._probe_public_url("wss://blue-tree.trycloudflare.com")
+
+        self.assertFalse(ready)
+        self.assertIn("hostname mismatch", error)
+
+    @patch("xq.tunnel.urllib.request.urlopen")
+    def test_cloudflare_530_keeps_public_route_waiting(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://blue-tree.trycloudflare.com", 530, "Tunnel unavailable", {}, None
+        )
+
+        ready, error = QuickTunnel._probe_public_url("wss://blue-tree.trycloudflare.com")
+
+        self.assertFalse(ready)
+        self.assertEqual(error, "Cloudflare HTTP 530")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,8 +5,11 @@ import json
 import os
 import platform
 import re
+import ssl
 import subprocess
 import threading
+import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -75,18 +78,25 @@ class QuickTunnel:
                 text=True, encoding="utf-8", errors="replace", creationflags=flags,
             )
             recent = []
+            public_url = None
+            registered = False
+            ready = False
             assert self.process.stdout is not None
             for line in self.process.stdout:
                 recent.append(line.strip())
                 recent = recent[-8:]
                 url = parse_tunnel_url(line)
                 if url:
-                    on_ready(url)
-                    # Keep draining output so cloudflared cannot block on a full pipe.
-                    for _line in self.process.stdout:
-                        if self.stop_flag.is_set():
-                            break
-                    return
+                    public_url = url
+                    on_status("公网地址已生成，正在等待证书和路由生效…")
+                if "registered tunnel connection" in line.lower():
+                    registered = True
+                if public_url and registered and not ready:
+                    self._wait_until_public_ready(public_url, on_status)
+                    if self.stop_flag.is_set():
+                        return
+                    on_ready(public_url)
+                    ready = True
                 if self.stop_flag.is_set():
                     return
             if not self.stop_flag.is_set():
@@ -154,6 +164,43 @@ class QuickTunnel:
         except (OSError, ValueError, KeyError, StopIteration):
             on_status("GitHub 接口受限，正在改用官方最新版直链…")
             return DIRECT_DOWNLOAD_URL, 0, ""
+
+    def _wait_until_public_ready(self, url: str, on_status, timeout: float = 60) -> None:
+        deadline = time.monotonic() + timeout
+        attempt = 0
+        last_error = "公网端点尚未响应"
+        while time.monotonic() < deadline and not self.stop_flag.is_set():
+            attempt += 1
+            ready, last_error = self._probe_public_url(url)
+            if ready:
+                return
+            on_status(f"公网证书和路由准备中（第 {attempt} 次检测）…")
+            self.stop_flag.wait(2)
+        if not self.stop_flag.is_set():
+            raise RuntimeError(f"公网地址在 60 秒内未就绪：{last_error}")
+
+    @staticmethod
+    def _probe_public_url(url: str) -> tuple[bool, str]:
+        """Confirm TLS hostname validity and that Cloudflare can route to the origin."""
+        import certifi
+
+        https_url = "https://" + url.removeprefix("wss://")
+        request = urllib.request.Request(
+            https_url,
+            headers={"User-Agent": "pyxq/0.1", "Connection": "close"},
+        )
+        context = ssl.create_default_context(cafile=certifi.where())
+        try:
+            with urllib.request.urlopen(request, timeout=6, context=context):
+                return True, ""
+        except urllib.error.HTTPError as exc:
+            # A WebSocket-only origin normally returns 400/426 to this plain HTTPS
+            # request. That still proves TLS and tunnel routing are both ready.
+            if exc.code < 500:
+                return True, ""
+            return False, f"Cloudflare HTTP {exc.code}"
+        except (OSError, urllib.error.URLError) as exc:
+            return False, str(exc)
 
     def _terminate_process(self) -> None:
         process, self.process = self.process, None
